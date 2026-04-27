@@ -73,25 +73,31 @@ if __name__ == "__main__":
     config_path = os.path.join(base_dir, "..", "config", "config.json")  
     with open(config_path, 'r', encoding='utf-8') as f:
         config = json.load(f)
-    r_in = 3.0
-    theta0 = 20.0
-    kappaff = 0.1
-    kappaK = 0.9 
-    opt_regime = "thin" #thin, thick or intermediate 
+    r_in = config["r_in"]
+    theta0 = config["theta0_deg"]
+    kappaff = config["kappa_ff"]
+    kappaK = config["kappa_K"]
+    opt_regime = config["optical_regime"]
     dalpha = config["dalpha"]
     tolerance = dalpha / 2
+    r_max = config["r_max"]
 
-    
+    # List of psi0_deg values to analyze
+    psi0_deg_list = [5.0, 30.0, 60.0, 75.0, 90.0]
+
     output_dir = os.path.join(base_dir, "..", "output")
+    input_npzs = []
+    for psi0_deg in psi0_deg_list:
+        filename = f"flux_rmax={r_max:.1f}_optical_{opt_regime}_psi0={psi0_deg:.1f}_rin={r_in:.1f}_theta0={theta0:.1f}_kappaff={kappaff:.3f}_kappaK={kappaK:.3f}.npz"
+        file_path = os.path.join(output_dir, filename)
+        if os.path.exists(file_path):
+            input_npzs.append(file_path)
+            print(f"Found file: {filename}")
+        else:
+            print(f"Warning: File not found, skipping: {filename}")
 
-    #列出需要对比分析的所有文件
-    filename1 = f"flux_rmax=50.0_optical_{opt_regime}_psi0=5.0_rin={r_in:.1f}_theta0={theta0:.1f}_kappaff={kappaff:.3f}_kappaK={kappaK:.3f}.npz"
-    file_path1 = os.path.join(output_dir, filename1)    
-    filename2 = f"flux_rmax=50.0_optical_{opt_regime}_psi0=10.0_rin={r_in:.1f}_theta0={theta0:.1f}_kappaff={kappaff:.3f}_kappaK={kappaK:.3f}.npz"
-    file_path2 = os.path.join(output_dir, filename2)   
+    if len(input_npzs) == 0:
+        print("Error: No flux files found. Please run step2 first.")
+        exit(1)
 
-    input_npzs = [
-       file_path1,
-       file_path2
-    ]
-    plot_flux_profiles(input_npzs, output_dir, tolerance=tolerance, r_in=r_in, theta0=theta0,kappaff=kappaff, kappaK=kappaK)
+    plot_flux_profiles(input_npzs, output_dir, tolerance=tolerance, r_in=r_in, theta0=theta0, kappaff=kappaff, kappaK=kappaK)
