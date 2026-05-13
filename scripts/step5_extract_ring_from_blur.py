@@ -6,9 +6,34 @@ import numpy as np
 from scipy.interpolate import RegularGridInterpolator
 
 
+RING_SELECTOR_TAG = "gaussian_bc_peakfit_v2"
+CRITICAL_B_SIGMA_FACTOR = 0.05
+
+
 def load_blur_map(map_path):
     data = np.load(map_path)
     return data["grid_x"], data["grid_y"], data["I_blur"], float(data["grid_spacing"])
+
+
+
+def format_step5_value(value):
+    if value is None:
+        return "full"
+    return f"{float(value):.3f}"
+
+
+
+def build_step5_output_paths(output_dir, file_name, dalpha, ring_b_min, ring_b_max, ring_peak_rel_threshold):
+    dalpha_tag = format_step5_value(dalpha)
+    bmin_tag = format_step5_value(ring_b_min)
+    bmax_tag = format_step5_value(ring_b_max)
+    thr_tag = format_step5_value(ring_peak_rel_threshold)
+    polar_name = f"{file_name}_fliter_polar_dalpha={dalpha_tag}_bmax={bmax_tag}.npz"
+    ring_name = (
+        f"{file_name}_fliter_ring_{RING_SELECTOR_TAG}"
+        f"_dalpha={dalpha_tag}_bmin={bmin_tag}_bmax={bmax_tag}_thr={thr_tag}.npz"
+    )
+    return os.path.join(output_dir, polar_name), os.path.join(output_dir, ring_name)
 
 
 
@@ -73,31 +98,49 @@ def find_local_peak_indices(profile):
 
 
 
-def extract_ring_from_polar(b_grid, phi_grid, i_polar, search_b_min, search_b_max, peak_rel_threshold):
+def parabolic_peak_position(x_values, y_values, peak_index):
+    if peak_index <= 0 or peak_index >= len(x_values) - 1:
+        return float(x_values[peak_index])
+
+    x1, x2, x3 = x_values[peak_index - 1], x_values[peak_index], x_values[peak_index + 1]
+    y1, y2, y3 = y_values[peak_index - 1], y_values[peak_index], y_values[peak_index + 1]
+    denom = (x1 - x2) * (x1 - x3) * (x2 - x3)
+    if denom == 0.0:
+        return float(x2)
+
+    quad_a = (x3 * (y2 - y1) + x2 * (y1 - y3) + x1 * (y3 - y2)) / denom
+    quad_b = (x3 * x3 * (y1 - y2) + x2 * x2 * (y3 - y1) + x1 * x1 * (y2 - y3)) / denom
+    if quad_a >= 0.0:
+        return float(x2)
+
+    x_vertex = -quad_b / (2.0 * quad_a)
+    return float(np.clip(x_vertex, min(x1, x3), max(x1, x3)))
+
+
+
+def extract_ring_from_polar(b_grid, phi_grid, i_polar, search_b_min, search_b_max, peak_rel_threshold, mass):
     search_mask = (b_grid >= search_b_min) & (b_grid <= search_b_max)
     if not np.any(search_mask):
         raise ValueError("The configured ring search interval does not overlap with b_grid.")
 
-    search_indices = np.flatnonzero(search_mask)
-    search_profiles = i_polar[:, search_mask]
-    peak_indices = np.empty(len(phi_grid), dtype=np.int64)
+    search_b = b_grid[search_mask].astype(np.float64)
+    search_profiles = i_polar[:, search_mask].astype(np.float64)
+    if search_b.size == 0:
+        raise ValueError("No radial samples remain inside the configured ring search interval.")
 
-    for phi_idx, profile in enumerate(search_profiles):
-        fallback_peak_local = int(np.argmax(profile))
-        profile_peak = profile[fallback_peak_local]
-        local_peak_indices = find_local_peak_indices(profile)
+    critical_b = 3.0 * np.sqrt(3.0) * float(mass)
+    sigma_b = CRITICAL_B_SIGMA_FACTOR * float(search_b_max - search_b_min)
+    if sigma_b <= 0.0:
+        sigma_b = max(float(search_b[-1] - search_b[0]), 1e-6)
+    gaussian_weight = np.exp(-0.5 * ((search_b - critical_b) / sigma_b) ** 2)
 
-        if local_peak_indices.size > 0:
-            intensity_threshold = peak_rel_threshold * profile_peak
-            local_peak_indices = local_peak_indices[profile[local_peak_indices] >= intensity_threshold]
-
-        if local_peak_indices.size == 0:
-            peak_indices[phi_idx] = search_indices[fallback_peak_local]
-        else:
-            peak_indices[phi_idx] = search_indices[local_peak_indices[-1]]
-
-    b_ring = b_grid[peak_indices]
-    i_ring = i_polar[np.arange(len(phi_grid)), peak_indices]
+    selector_score = search_profiles * gaussian_weight[None, :]
+    peak_indices = np.argmax(selector_score, axis=1)
+    b_ring = np.array(
+        [parabolic_peak_position(search_b, selector_score[i], int(peak_indices[i])) for i in range(len(phi_grid))],
+        dtype=np.float64,
+    )
+    i_ring = search_profiles[np.arange(len(phi_grid)), peak_indices]
     x_ring = b_ring * np.cos(phi_grid)
     y_ring = b_ring * np.sin(phi_grid)
 
@@ -123,6 +166,9 @@ def extract_ring_from_polar(b_grid, phi_grid, i_polar, search_b_min, search_b_ma
         "diameter_y": diameter_y,
         "search_b_min": float(search_b_min),
         "search_b_max": float(search_b_max),
+        "critical_b": float(critical_b),
+        "selector_sigma_b": float(sigma_b),
+        "selector_tag": RING_SELECTOR_TAG,
     }
 
 
@@ -149,8 +195,18 @@ def main():
         f"_kappaK={config['kappa_K']:.3f}"
     )
     map_path = os.path.join(output_dir, file_name + "_fliter_map.npz")
-    polar_path = os.path.join(output_dir, file_name + "_fliter_polar.npz")
-    ring_path = os.path.join(output_dir, file_name + "_fliter_ring.npz")
+    dalpha = float(config["dalpha"])
+    search_b_min = float(config.get("ring_b_min", 0.0))
+    raw_search_b_max = config.get("ring_b_max")
+    ring_peak_rel_threshold = float(config.get("ring_peak_rel_threshold", 0.5))
+    polar_path, ring_path = build_step5_output_paths(
+        output_dir,
+        file_name,
+        dalpha,
+        search_b_min,
+        raw_search_b_max,
+        ring_peak_rel_threshold,
+    )
 
     if os.path.exists(polar_path) and os.path.exists(ring_path):
         print(f"跳过此步，因为文件已存在: {polar_path} 和 {ring_path}")
@@ -159,16 +215,22 @@ def main():
     print("Running Step 5: Extract Ring From Blurred Shadow")
 
     grid_x, grid_y, i_blur, grid_spacing = load_blur_map(map_path)
-    b_grid, phi_grid, i_polar = build_polar_map(
-        grid_x,
-        grid_y,
-        i_blur,
-        dalpha=config["dalpha"],
-        grid_spacing=grid_spacing,
-        b_max=config.get("ring_b_max"),
-    )
 
-    if not os.path.exists(polar_path):
+    if os.path.exists(polar_path):
+        polar_data = np.load(polar_path)
+        b_grid = polar_data["b_grid"].astype(np.float64)
+        phi_grid = polar_data["phi_grid"].astype(np.float64)
+        i_polar = polar_data["I_polar"].astype(np.float64)
+        print(f"跳过极坐标强度图重建，因为文件已存在: {polar_path}")
+    else:
+        b_grid, phi_grid, i_polar = build_polar_map(
+            grid_x,
+            grid_y,
+            i_blur,
+            dalpha=dalpha,
+            grid_spacing=grid_spacing,
+            b_max=raw_search_b_max,
+        )
         np.savez_compressed(
             polar_path,
             b_grid=b_grid.astype(np.float32),
@@ -176,16 +238,11 @@ def main():
             I_polar=i_polar.astype(np.float32),
         )
         print(f"极坐标强度图已成功保存至：{polar_path}")
-    else:
-        print(f"跳过保存极坐标强度图，因为文件已存在: {polar_path}")
 
-    search_b_min = float(config.get("ring_b_min", 0.0))
-    raw_search_b_max = config.get("ring_b_max")
     if raw_search_b_max is None:
         search_b_max = float(b_grid[-1])
     else:
         search_b_max = min(float(raw_search_b_max), float(b_grid[-1]))
-    ring_peak_rel_threshold = float(config.get("ring_peak_rel_threshold", 0.5))
 
     if search_b_min > search_b_max:
         raise ValueError(
@@ -201,6 +258,7 @@ def main():
         search_b_min,
         search_b_max,
         ring_peak_rel_threshold,
+        mass=float(config.get("M", 1.0)),
     )
 
     if not os.path.exists(ring_path):
@@ -219,11 +277,15 @@ def main():
             diameter_y=np.float64(ring_result["diameter_y"]),
             search_b_min=np.float64(ring_result["search_b_min"]),
             search_b_max=np.float64(ring_result["search_b_max"]),
+            critical_b=np.float64(ring_result["critical_b"]),
+            selector_sigma_b=np.float64(ring_result["selector_sigma_b"]),
+            selector_tag=np.array(ring_result["selector_tag"]),
         )
         print(f"亮环结果已成功保存至：{ring_path}")
     else:
         print(f"跳过保存亮环结果，因为文件已存在: {ring_path}")
 
+    print(f"亮环提取器: {RING_SELECTOR_TAG}, critical_b={ring_result['critical_b']:.6f}, sigma_b={ring_result['selector_sigma_b']:.6f}")
     print(
         "亮环直径统计: "
         f"mean={ring_result['diameter_mean']:.6f}, "
