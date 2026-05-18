@@ -100,6 +100,7 @@ def config_for_run(base_config, run):
     config["ring_b_min"] = WINDOW_MIN
     config["ring_b_max"] = WINDOW_MAX
     config["ring_peak_rel_threshold"] = PEAK_THRESHOLD
+    config["ring_selector"] = "gaussian_bc_peakfit_v2"
     return config
 
 
@@ -249,17 +250,17 @@ def plot_scan(ax, rows, x_key, title, xlabel, logx=False, fixed_text=None, xtick
         ax.text(0.5, 0.5, "No completed data", ha="center", va="center", transform=ax.transAxes)
         ax.set_title(title)
         ax.set_xlabel(xlabel)
-        ax.set_ylabel("D_ring")
+        ax.set_ylabel(r"$D_{\rm ring} - 2b_c$")
         ax.grid(alpha=0.3)
         return
     rows = sorted(rows, key=lambda r: r[x_key])
     x = [r[x_key] for r in rows]
-    y = [r["diameter_mean"] for r in rows]
+    y = [r["diameter_mean"] - D_REF for r in rows]
     ax.plot(x, y, marker="o", lw=1.5)
-    ax.axhline(D_REF, color="k", ls="--", lw=1, label=r"$2b_c = 6\sqrt{3}\,M$")
+    ax.axhline(0.0, color="k", ls="--", lw=1, label=r"$D_{\rm ring} = 2b_c = 6\sqrt{3}\,M$")
     ax.set_title(title)
     ax.set_xlabel(xlabel)
-    ax.set_ylabel("D_ring")
+    ax.set_ylabel(r"$D_{\rm ring} - 2b_c$")
     ax.grid(alpha=0.3)
     if logx:
         ax.set_xscale("log")

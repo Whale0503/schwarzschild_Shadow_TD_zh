@@ -30,22 +30,36 @@ def build_blurred_map(b_vals, alpha_vals, f_vals, step_b, xmax, ymax, max_distan
     tree = cKDTree(data_points)
     dist, idx = tree.query(grid_points, distance_upper_bound=max_distance)
 
-    safe_f = np.zeros(len(grid_points))
+    safe_f = np.zeros(len(grid_points), dtype=np.float64)
+    support_flat = np.zeros(len(grid_points), dtype=bool)
     valid_mask = np.isfinite(dist)
-    safe_f[valid_mask] = f_vals[idx[valid_mask]]
-    i_raw = safe_f.reshape(grid_x.shape)
+    if np.any(valid_mask):
+        sampled_f = f_vals[idx[valid_mask]]
+        finite_sample_mask = np.isfinite(sampled_f)
+        valid_indices = np.flatnonzero(valid_mask)[finite_sample_mask]
+        safe_f[valid_indices] = sampled_f[finite_sample_mask]
+        support_flat[valid_indices] = True
 
-    sigma_pixels = 1.77 / step_b
+    i_raw = safe_f.reshape(grid_x.shape)
+    support_map = support_flat.reshape(grid_x.shape)
+    support_fraction = float(np.mean(support_map))
+    print(f"有限样本覆盖率: {support_fraction:.6f} ({int(np.count_nonzero(support_map))}/{support_map.size})")
+
+    sigma_pixels = 0.50 / step_b
     i_blur = gaussian_filter(i_raw, sigma=sigma_pixels)
 
-    return grid_x, grid_y, i_raw, i_blur, grid_spacing, sigma_pixels
+    return grid_x, grid_y, i_raw, i_blur, support_map, support_fraction, grid_spacing, sigma_pixels
 
 
 
 def save_blur_png(grid_x, grid_y, i_blur, save_path, config):
     print("正在绘图...")
 
-    vmax = np.percentile(i_blur, 99.9)
+    vmax = np.nanpercentile(i_blur, 99.9)
+    if not np.isfinite(vmax) or vmax <= 0.0:
+        vmax = np.nanmax(i_blur) if np.any(np.isfinite(i_blur)) else 1.0
+    if not np.isfinite(vmax) or vmax <= 0.0:
+        vmax = 1.0
     font_size = 16
     cmap = LinearSegmentedColormap.from_list(
         "custom_cmap",
@@ -91,7 +105,7 @@ def make_shadow(step_b, input_path, plot_path, map_path, config):
     alpha_vals = data["alpha"]
     f_vals = data["F"]
 
-    grid_x, grid_y, i_raw, i_blur, grid_spacing, sigma_pixels = build_blurred_map(
+    grid_x, grid_y, i_raw, i_blur, support_map, support_fraction, grid_spacing, sigma_pixels = build_blurred_map(
         b_vals,
         alpha_vals,
         f_vals,
@@ -107,6 +121,8 @@ def make_shadow(step_b, input_path, plot_path, map_path, config):
             grid_y=grid_y.astype(np.float32),
             I_raw=i_raw.astype(np.float32),
             I_blur=i_blur.astype(np.float32),
+            support_map=support_map,
+            support_fraction=np.float64(support_fraction),
             grid_spacing=np.float64(grid_spacing),
             sigma_pixels=np.float64(sigma_pixels),
             xmax=np.float64(config["shadow_xmax"]),
